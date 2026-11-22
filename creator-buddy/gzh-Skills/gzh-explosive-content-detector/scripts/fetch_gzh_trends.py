@@ -832,10 +832,31 @@ def main():
         
         print(f"✅ 数据已保存到: {output_file}")
         print(f"📊 查询关键词: {args.keyword}")
-        print(f"📈 总数据量: {sum(len(data.get(k, [])) for k in ['low_fan_explosive', 'ten_w_reading', 'original_rank', 'one_w_reading'])} 条")
-        
+        total = sum(len(data.get(k, [])) for k in ['low_fan_explosive', 'ten_w_reading', 'original_rank', 'one_w_reading'])
+        print(f"📈 总数据量: {total} 条")
+
+        # [local patch] 0 条不等于“没有爆款”，多为后端不可用，必须显式失败
+        if total == 0:
+            print(
+                "❌ [BACKEND-UNAVAILABLE] 未取到任何数据（0 条）。后端 onetotenvip.com 当前无法解析或返回空。\n"
+                "   处理建议：改用 WebSearch 检索公开报道作为事实底座，并在输出中声明数据来源；"
+                "不要把空结果当作“该赛道没有爆款”的结论。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     except Exception as e:
-        print(f"❌ 错误: {str(e)}", file=sys.stderr)
+        msg = str(e)
+        print(f"❌ 错误: {msg}", file=sys.stderr)
+        # [local patch] DNS/连接失败时给出可执行的降级建议
+        if "nodename" in msg or "Name or service not known" in msg or "timed out" in msg:
+            print(
+                "❌ [BACKEND-UNAVAILABLE] 后端 onetotenvip.com 无法解析/连接。\n"
+                "   处理建议：改用 WebSearch 检索公开报道作为事实底座，并在输出中声明数据来源；"
+                "不要把空结果当作“该赛道没有爆款”的结论。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         sys.exit(1)
 
 

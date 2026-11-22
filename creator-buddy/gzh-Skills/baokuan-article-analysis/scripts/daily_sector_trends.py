@@ -817,8 +817,23 @@ def main() -> None:
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     html_path.write_text(build_html(report), encoding="utf-8")
 
+    total_items = sum(len(s.get("items", [])) for s in report["sectors"])
+    all_failed = total_items == 0 and all(s.get("errors") for s in report["sectors"])
+
     print(f"Saved JSON: {json_path}")
     print(f"Saved HTML: {html_path}")
+
+    # [local patch] 后端不可用时不要伪装成功：空数据会被误读成“本赛道没有爆款”
+    if total_items == 0:
+        detail = "; ".join(e for s in report["sectors"] for e in s.get("errors", []))
+        print(
+            f"[BACKEND-UNAVAILABLE] 未取到任何数据（0 条）。API 后端 {API_HOST_PATH.split('/')[0]} "
+            f"当前不可用或返回空。\n原始错误：{detail}\n"
+            "处理建议：改用 WebSearch 检索公开报道作为事实底座，并在输出中声明数据来源；"
+            "不要把空结果当作“该赛道没有爆款”的结论。",
+            file=__import__("sys").stderr,
+        )
+        raise SystemExit(2 if all_failed else 3)
 
 
 if __name__ == "__main__":
