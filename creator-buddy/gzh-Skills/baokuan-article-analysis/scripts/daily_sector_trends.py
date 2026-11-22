@@ -12,6 +12,7 @@ import gzip
 import html
 import json
 import math
+import random
 import re
 import socket
 import ssl
@@ -166,6 +167,132 @@ def fetch_keyword(keyword: str, start_date: str | None, timeout: int) -> list[di
     return items
 
 
+# ---------------------------------------------------------------------------
+# [local patch] 后备数据源：搜狗微信搜索
+# 背景：原后端 onetotenvip.com 已下线（四个公共 DNS 均无 A 记录，NS 仍在阿里云）。
+# 能力边界：搜狗只返回标题、摘要、公众号名、发布时间，
+#          **不返回阅读数/点赞/分享/在看**，因此 dataScore 恒为 0。
+# 用途限定：选题方向与标题结构参考；不可用于阅读量排名或爆款判定。
+# ---------------------------------------------------------------------------
+SOGOU_ENDPOINT = "https://weixin.sogou.com/weixin"
+_SOGOU_LAST_CALL = [0.0]  # 上次请求时间，用于全局节流
+SOGOU_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://weixin.sogou.com/",
+}
+
+
+def _sogou_get(query: str, page: int, timeout: int) -> str:
+    import time
+    import urllib.parse
+    import urllib.request
+
+    # 全局节流：搜狗对高频访问会直接跳验证码，同一次运行内两次请求至少间隔 2.5s
+    gap = time.time() - _SOGOU_LAST_CALL[0]
+    if gap < 2.5:
+        time.sleep(2.5 - gap + random.uniform(0, 0.6))
+    _SOGOU_LAST_CALL[0] = time.time()
+
+    params = {"type": "2", "query": query, "ie": "utf8", "page": str(page)}
+    url = f"{SOGOU_ENDPOINT}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers=SOGOU_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    return raw.decode("utf-8", "ignore")
+
+
+def _clean_fragment(fragment: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", fragment or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).replace("\u200b", "").strip()
+
+
+def _sogou_get_guarded(query: str, page: int, timeout: int) -> str | None:
+    """取一页。遇反爬自动退避重试一次；仍失败返回 None。"""
+    import time
+
+    for attempt in range(2):
+        try:
+            text = _sogou_get(query, page, timeout)
+        except Exception:
+            if attempt == 1:
+                raise
+            time.sleep(3)
+            continue
+        if "antispider" in text or "请输入验证码" in text:
+            if attempt == 0:
+                time.sleep(12 + random.uniform(0, 8))
+                continue
+            return None
+        return text
+    return None
+
+
+def fetch_sogou_keyword(
+    keyword: str,
+    days: int,
+    max_pages: int = 3,
+    timeout: int = 20,
+) -> list[dict[str, Any]]:
+    """用搜狗微信搜索取标题级样本。结构对齐 fetch_keyword，统计字段为 0。"""
+    cutoff = dt.date.today() - dt.timedelta(days=max(1, days))
+    items: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        try:
+            page_html = _sogou_get_guarded(keyword, page, timeout)
+        except Exception as exc:
+            if page == 1:
+                raise RuntimeError(f"搜狗后备源请求失败：{exc}") from exc
+            break
+
+        if page_html is None:
+            if not items:
+                raise RuntimeError(
+                    "搜狗触发反爬验证（短时间内请求过多，通常 5–10 分钟后恢复）。"
+                    "可降低抓取量（--fallback-pages 1），或直接用 WebSearch 检索公开报道。"
+                )
+            break
+
+        if "没有找到相关的微信公众号文章" in page_html:
+            break
+
+        chunks = re.split(r'<li id="sogou_vr_11002601_box_', page_html)[1:]
+        if not chunks:
+            break
+        for chunk in chunks:
+            title_m = re.search(r'<h3>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
+            if not title_m:
+                continue
+            link, title = title_m.group(1), _clean_fragment(title_m.group(2))
+            if not title:
+                continue
+            summary_m = re.search(r'<p class="txt-info"[^>]*>(.*?)</p>', chunk, re.S)
+            account_m = re.search(r'<span class="all-time-y2">(.*?)</span>', chunk, re.S)
+            ts_m = re.search(r"timeConvert\('(\d+)'\)", chunk)
+            published = dt.datetime.fromtimestamp(int(ts_m.group(1))).date() if ts_m else None
+            if published and published < cutoff:
+                continue
+            full_link = link if link.startswith("http") else f"https://weixin.sogou.com{link}"
+            items.append(normalize_item({
+                "category": "标题样本",
+                "matchedKeyword": keyword,
+                "title": title,
+                "summary": _clean_fragment(summary_m.group(1)) if summary_m else "",
+                "accountName": _clean_fragment(account_m.group(1)) if account_m else "",
+                "publicTime": published.isoformat() if published else "",
+                "oriUrl": full_link,
+                "backend": "sogou",
+            }))
+    return items
+
+
 def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title") or "").strip()
     summary = str(item.get("summary") or "").strip()
@@ -192,7 +319,10 @@ def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
         "shareCount": parse_count(item.get("shareCount", 0)),
         "clicksCount": item.get("clicksCount", "0"),
         "watchCount": item.get("watchCount", "0"),
+        "backend": item.get("backend") or "api",
     }
+    # [local patch] 搜狗后备源没有互动数据，必须对外标记，避免把 0 当成“没人看”
+    out["metricsAvailable"] = out["backend"] == "api"
     out["dataScore"] = score_item(out)
     return out
 
@@ -286,8 +416,11 @@ def build_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- 查询关键词：{', '.join(sector['keywords'])}")
         lines.append(f"- 命中文章：{len(sector['items'])} 篇")
         if sector["items"]:
-            top = sector["items"][0]
-            lines.append(f"- 最高阅读：{top['clicksCount']}，《{top['title']}》")
+            if any(x.get("metricsAvailable") for x in sector["items"]):
+                top = sector["items"][0]
+                lines.append(f"- 最高阅读：{top['clicksCount']}，《{top['title']}》")
+            else:
+                lines.append("- 数据来源：搜狗微信搜索后备源（标题级，无阅读/点赞/分享数）")
         lines.append("")
         lines.append("| # | 标题 | 公众号 | 粉丝 | 发布时间 | 阅读 | 点赞 | 分享 | 评论 | 类别 | 爆款原因初判 | 链接 |")
         lines.append("|---:|---|---|---|---|---:|---:|---:|---:|---|---|---|")
@@ -589,6 +722,7 @@ def build_formula_cards(sector_name: str, title_words: list[str]) -> str:
 
 def build_sector_html(sector: dict[str, Any]) -> str:
     items = sector["items"]
+    has_metrics = any(x.get("metricsAvailable") for x in items)
     top_reads, top_shares, top_comments = top_metric_items(items)
     title_words = extract_title_patterns([x.get("title", "") for x in items])
     avg_share = round(sum(parse_count(x.get("shareCount")) for x in items) / max(1, len(items)), 1)
@@ -596,6 +730,21 @@ def build_sector_html(sector: dict[str, Any]) -> str:
     max_comment = parse_count(top_comments.get("commentCount")) if top_comments else 0
     top_title = top_reads.get("title") if top_reads else "暂无"
     top_read_count = display_count(top_reads.get("clicksCount")) if top_reads else "0"
+    # [local patch] 后备源没有互动数据，用「覆盖账号/覆盖日期」替代 0 值指标卡
+    if has_metrics:
+        metric_kpis = (
+            f'<div class="kpi"><span>最高阅读</span><strong>{esc(top_read_count)}</strong><small>{esc(top_title)}</small></div>'
+            f'<div class="kpi"><span>最高分享</span><strong>{max_share}</strong><small>{esc(top_shares.get("title") if top_shares else "暂无")}</small></div>'
+            f'<div class="kpi"><span>最高评论</span><strong>{max_comment}</strong><small>{esc(top_comments.get("title") if top_comments else "暂无")}</small></div>'
+        )
+    else:
+        acct_n = len({x.get("accountName") for x in items if x.get("accountName")})
+        day_n = len({x.get("publicTime") for x in items if x.get("publicTime")})
+        metric_kpis = (
+            f'<div class="kpi"><span>覆盖账号</span><strong>{acct_n}</strong><small>去重公众号</small></div>'
+            f'<div class="kpi"><span>覆盖日期</span><strong>{day_n}</strong><small>天</small></div>'
+            f'<div class="kpi"><span>数据能力</span><strong>标题级</strong><small>无阅读量</small></div>'
+        )
     return f"""<section class="sector">
   <div class="section-head">
     <div>
@@ -607,9 +756,7 @@ def build_sector_html(sector: dict[str, Any]) -> str:
 
   <div class="kpi-grid">
     <div class="kpi"><span>命中文章</span><strong>{len(items)}</strong><small>篇</small></div>
-    <div class="kpi"><span>最高阅读</span><strong>{esc(top_read_count)}</strong><small>{esc(top_title)}</small></div>
-    <div class="kpi"><span>最高分享</span><strong>{max_share}</strong><small>{esc(top_shares.get("title") if top_shares else "暂无")}</small></div>
-    <div class="kpi"><span>最高评论</span><strong>{max_comment}</strong><small>{esc(top_comments.get("title") if top_comments else "暂无")}</small></div>
+    {metric_kpis}
   </div>
 
   <div class="viz-grid">
@@ -655,6 +802,29 @@ def build_html(report: dict[str, Any]) -> str:
     top_reads, top_shares, _ = top_metric_items(all_items)
     top_read_text = display_count(top_reads.get("clicksCount")) if top_reads else "0"
     top_share_text = str(parse_count(top_shares.get("shareCount"))) if top_shares else "0"
+    # [local patch] 后备源下如实说明数据边界，避免 0 指标被当成结论
+    if report.get("metricsAvailable", True):
+        hero_title = "爆款文章分析"
+        metrics_note = "阅读、点赞、分享、评论来自公众号爆款文章洞察接口快照，适合做趋势判断和写作参考。"
+        metric_cards = (
+            f'<div class="summary-card"><span>最高阅读</span><strong>{esc(top_read_text)}</strong>'
+            f'<small>{esc(top_reads.get("title") if top_reads else "暂无")}</small></div>'
+            f'<div class="summary-card"><span>最高分享</span><strong>{esc(top_share_text)}</strong>'
+            f'<small>{esc(top_shares.get("title") if top_shares else "暂无")}</small></div>'
+        )
+    else:
+        hero_title = "赛道标题样本（后备源）"
+        metrics_note = (
+            "主数据接口已下线，本次为<b>搜狗微信搜索</b>后备数据：仅含标题、摘要、公众号名与发布时间，"
+            "<b>不含阅读/点赞/分享数</b>。可用于选题方向、标题结构与同赛道盘点，不可据此判定某篇是爆款。"
+        )
+        acct_count = len({i.get("accountName") for i in all_items if i.get("accountName")})
+        metric_cards = (
+            f'<div class="summary-card"><span>覆盖账号</span><strong>{acct_count}</strong>'
+            f'<small>去重后公众号数</small></div>'
+            f'<div class="summary-card"><span>数据能力</span><strong>标题级</strong>'
+            f'<small>无阅读量指标</small></div>'
+        )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -753,14 +923,13 @@ h3{{font-size:18px;margin:0 0 16px;letter-spacing:0}}
   <header class="hero">
     <div>
       <p class="eyebrow">WeChat Hot Article Radar</p>
-      <h1>爆款文章分析</h1>
-      <p>数据窗口：{esc(report["startDate"])} 至 {esc(report["reportDate"])}。阅读、点赞、分享、评论来自公众号爆款文章洞察接口快照，适合做趋势判断和写作参考。</p>
+      <h1>{hero_title}</h1>
+      <p>数据窗口：{esc(report["startDate"])} 至 {esc(report["reportDate"])}。{metrics_note}</p>
     </div>
     <div class="summary-grid">
       <div class="summary-card"><span>赛道数</span><strong>{sector_count}</strong><small>本次分析范围</small></div>
       <div class="summary-card"><span>文章数</span><strong>{total_items}</strong><small>去重后样本</small></div>
-      <div class="summary-card"><span>最高阅读</span><strong>{esc(top_read_text)}</strong><small>{esc(top_reads.get("title") if top_reads else "暂无")}</small></div>
-      <div class="summary-card"><span>最高分享</span><strong>{esc(top_share_text)}</strong><small>{esc(top_shares.get("title") if top_shares else "暂无")}</small></div>
+      {metric_cards}
     </div>
   </header>
   {sectors_html}
@@ -780,6 +949,12 @@ def main() -> None:
     parser.add_argument("--output-dir", default="baokuan-article-analysis")
     parser.add_argument("--report-date", default=dt.date.today().isoformat())
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument(
+        "--fallback-pages",
+        type=int,
+        default=3,
+        help="主后端不可用时，用搜狗微信搜索后备源抓取的页数（每页约 10 条）；0 表示禁用后备源。",
+    )
     args = parser.parse_args()
 
     config = load_sector_config(args.sector_config) or parse_sector_args(args.sector)
@@ -797,18 +972,44 @@ def main() -> None:
     for name, keywords in config.items():
         all_items: list[dict[str, Any]] = []
         errors: list[str] = []
+        backends: set[str] = set()
         for keyword in keywords:
             try:
                 all_items.extend(fetch_keyword(keyword, start_date, timeout=args.timeout))
+                backends.add("api")
             except Exception as exc:
-                errors.append(f"{keyword}: {exc}")
+                # [local patch] 主后端不可用时自动切搜狗后备源，而不是整条链路放弃
+                if args.fallback_pages <= 0:
+                    errors.append(f"{keyword}: {exc}")
+                    continue
+                try:
+                    got = fetch_sogou_keyword(
+                        keyword,
+                        args.days,
+                        max_pages=args.fallback_pages,
+                        timeout=min(args.timeout, 20),
+                    )
+                except Exception as fallback_exc:
+                    errors.append(f"{keyword}: 主后端失败（{exc}）；搜狗后备源失败（{fallback_exc}）")
+                    continue
+                if got:
+                    all_items.extend(got)
+                    backends.add("sogou")
+                else:
+                    errors.append(f"{keyword}: 主后端失败（{exc}）；搜狗后备源近 {args.days} 天无结果")
         items = dedupe_and_rank(all_items, args.max_items_per_sector, keywords)
         report["sectors"].append({
             "name": name,
             "keywords": keywords,
             "items": items,
             "errors": errors,
+            "backends": sorted(backends),
         })
+
+    used_backends = sorted({b for s in report["sectors"] for b in s.get("backends", [])})
+    report["dataSources"] = used_backends
+    report["metricsAvailable"] = "api" in used_backends
+    report["source"] = SOURCE if report["metricsAvailable"] else "搜狗微信搜索（后备源，无阅读/点赞/分享数据）"
 
     out_root = Path(args.output_dir).expanduser().resolve() / report_date.isoformat()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -822,6 +1023,15 @@ def main() -> None:
 
     print(f"Saved JSON: {json_path}")
     print(f"Saved HTML: {html_path}")
+
+    # [local patch] 用了后备源就明说，别让“没有阅读数”被误读成“没有爆款”
+    if total_items and not report["metricsAvailable"]:
+        print(
+            f"[FALLBACK-SOGOU] 共 {total_items} 条数据来自搜狗微信搜索后备源："
+            "仅含标题、摘要、公众号名、发布时间，**不含阅读/点赞/分享数**，dataScore 恒为 0。\n"
+            "适用：选题方向、标题结构、同赛道竞争者盘点。\n"
+            "不适用：判断单篇是否爆款、计算万读收益。需要阅读量请补充 WebSearch 交叉验证。"
+        )
 
     # [local patch] 后端不可用时不要伪装成功：空数据会被误读成“本赛道没有爆款”
     if total_items == 0:

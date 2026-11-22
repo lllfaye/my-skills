@@ -261,6 +261,12 @@ def main():
         api_key = load_api_key()
     if not api_key:
         print("[ERROR] 无法获取 LabNana API Key。请设置 LABNANA_API_KEY 环境变量或在 .labnana.env 中配置。", file=sys.stderr)
+        # [local patch] 明确给出不付费的替代路径，避免用户以为没有 key 就完全做不了图
+        print("", file=sys.stderr)
+        print("替代方案（无需 API Key）：", file=sys.stderr)
+        print("  - 流程图/架构图/ER/脑图/路线图：直接手写 SVG 或 HTML，公众号编辑器支持粘贴内联 SVG 截图；", file=sys.stderr)
+        print("  - 数据图表：用 HTML + CSS 或 Chart.js 生成后截图；", file=sys.stderr)
+        print("  - 本脚本的价值是「AI 美化视觉风格」，不是「能不能画出图」。", file=sys.stderr)
         sys.exit(1)
 
     # 构建提示词

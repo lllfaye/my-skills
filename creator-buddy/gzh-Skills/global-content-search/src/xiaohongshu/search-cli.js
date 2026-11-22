@@ -107,6 +107,9 @@ async function main() {
         2,
       ),
     );
+    // [local patch] 后端不可用时必须给非零退出码。
+    // 否则下游只看到 "results: []"，会误读成"该关键词没有内容"，而不是"没连上数据源"。
+    process.exitCode = 2;
   }
 }
 

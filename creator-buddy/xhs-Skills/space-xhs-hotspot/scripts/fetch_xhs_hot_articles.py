@@ -60,6 +60,11 @@ def fetch_xhs_hot_notes(keyword: str, debug: bool = False, max_retries: int = 3,
         print("❌ 错误：未找到 REDFOX_API_KEY 环境变量。", file=sys.stderr)
         print("请在 Coze 平台的环境变量配置中添加 REDFOX_API_KEY，或在本地 shell 配置文件（如 ~/.zshrc / ~/.bashrc）中添加：", file=sys.stderr)
         print("  export REDFOX_API_KEY=your_api_key_here", file=sys.stderr)
+        # [local patch] 补上「不买 API 怎么办」的降级路径，否则只有一条死路
+        print("", file=sys.stderr)
+        print("没有该密钥时的替代做法（无需付费）：", file=sys.stderr)
+        print("  1) 用 WebSearch 检索「小红书 + 关键词」，可拿到笔记标题、话题与大致热度，无精确互动数；", file=sys.stderr)
+        print("  2) 本脚本不绕过风控做抓取，请勿以无密钥状态运行后把空结果当成「没有内容」。", file=sys.stderr)
         sys.exit(1)
     
     # 构建请求

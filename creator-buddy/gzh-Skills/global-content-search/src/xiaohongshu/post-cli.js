@@ -94,6 +94,8 @@ async function main() {
         2,
       ),
     );
+    // [local patch] 后端不可用时给非零退出码，避免空结果被当成"页面没有内容"
+    process.exitCode = 2;
   }
 }
 
