@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "ac803db5-bb52-4b9a-9c36-11b787f5d73e",
+  "path": "creator-buddy",
+  "path_key": "creator-buddy",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "import",
+    "ref": null,
+    "subpath": null,
+    "branch": null
+  }
+}
