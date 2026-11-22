@@ -177,12 +177,14 @@ def fetch_keyword(keyword: str, start_date: str | None, timeout: int) -> list[di
 SOGOU_ENDPOINT = "https://weixin.sogou.com/weixin"
 _SOGOU_LAST_CALL = [0.0]  # 上次请求时间，用于全局节流
 SOGOU_HEADERS = {
+    # 踩坑记录：UA 里**不能**带 "(KHTML, like Gecko)"。
+    # 实测带 Gecko 的完整 Chrome UA 会返回 ~5KB 验证码页（含 antispider.min.js），
+    # 去掉后正常返回 ~31KB 结果页、10 条数据。与请求频率无关，是 UA 指纹校验。
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml",
-    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Accept": "*/*",
     "Referer": "https://weixin.sogou.com/",
 }
 
