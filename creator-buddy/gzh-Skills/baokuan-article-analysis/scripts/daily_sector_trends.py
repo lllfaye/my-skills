@@ -257,8 +257,9 @@ def fetch_sogou_keyword(
         if page_html is None:
             if not items:
                 raise RuntimeError(
-                    "搜狗触发反爬验证（短时间内请求过多，通常 5–10 分钟后恢复）。"
-                    "可降低抓取量（--fallback-pages 1），或直接用 WebSearch 检索公开报道。"
+                    "搜狗反爬拦截（antip=wx_sh2，IP 级限流）。常见原因是短时间内请求过多，"
+                    "需等待 10–30 分钟冷却。建议：降低抓取量（--fallback-pages 1）、"
+                    "减少关键词数量，或改用 WebSearch 检索公开报道。"
                 )
             break
 
@@ -941,6 +942,43 @@ h3{{font-size:18px;margin:0 0 16px;letter-spacing:0}}
 </html>"""
 
 
+def build_search_plan(config: dict[str, list[str]], days: int, out_root: Path) -> Path:
+    """[local patch] 数据源全挂时，输出可直接执行的检索清单，避免链路彻底断掉。"""
+    lines = [
+        "# 检索任务清单（数据源不可用时使用）",
+        "",
+        f"生成时间：{dt.datetime.now().isoformat(timespec='seconds')}",
+        f"时间窗口：近 {days} 天",
+        "",
+        "用法：用 WebSearch 逐条执行下列检索式，按下表字段记录结果。",
+        "",
+        "| 赛道 | 关键词 | 标题 | 公众号 | 发布时间 | 可见阅读数 | 备注 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        "",
+        "**硬性约束**：",
+        "1. 只有页面上明确写出阅读量时才填「可见阅读数」，否则留空，不得估算或换算。",
+        "2. 输出时必须声明「数据来源：公开检索，非平台后台数据」。",
+        '3. 不得把「搜不到」写成「该赛道没有爆款」。',
+        "",
+    ]
+    for name, kws in config.items():
+        lines.append(f"## {name}")
+        lines.append("")
+        for kw in kws:
+            lines.extend([
+                f"### 关键词：{kw}",
+                "",
+                f"- `{kw} 公众号 10万+`",
+                f"- `site:mp.weixin.qq.com {kw}`",
+                f"- `{kw} 爆款 标题 拆解`",
+                f"- `{kw} 公众号 赛道 收益`",
+                "",
+            ])
+    path = out_root / "search-plan.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch and analyze WeChat hot articles by sector.")
     parser.add_argument("--sector", action="append", help="Sector spec: 赛道=关键词1,关键词2. Can repeat.")
@@ -1038,9 +1076,15 @@ def main() -> None:
     # [local patch] 后端不可用时不要伪装成功：空数据会被误读成“本赛道没有爆款”
     if total_items == 0:
         detail = "; ".join(e for s in report["sectors"] for e in s.get("errors", []))
+        # [local patch] 不能只报错收场，给一份可执行的检索清单
+        try:
+            plan_path = build_search_plan(config, args.days, out_root)
+            plan_hint = f"\n已生成检索清单：{plan_path}\n按清单用 WebSearch 逐条检索即可继续，不必等数据源恢复。"
+        except Exception as plan_exc:
+            plan_hint = f"\n（检索清单生成失败：{plan_exc}）"
         print(
-            f"[BACKEND-UNAVAILABLE] 未取到任何数据（0 条）。API 后端 {API_HOST_PATH.split('/')[0]} "
-            f"当前不可用或返回空。\n原始错误：{detail}\n"
+            f"[BACKEND-UNAVAILABLE] 未取到任何数据（0 条）。主后端 {API_HOST_PATH.split('/')[0]} "
+            f"与搜狗后备源均不可用。\n原始错误：{detail}{plan_hint}\n"
             "处理建议：改用 WebSearch 检索公开报道作为事实底座，并在输出中声明数据来源；"
             "不要把空结果当作“该赛道没有爆款”的结论。",
             file=__import__("sys").stderr,

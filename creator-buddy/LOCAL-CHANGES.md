@@ -96,6 +96,17 @@ UA 里带 `(KHTML, like Gecko)` 会被判定为伪装爬虫，返回约 5KB 验�
 **解析逻辑已验证与网络无关**：把网络层替换成离线 HTML 后，`fetch_sogou_keyword()`
 仍能正确解析全部字段。所以出现失败时只可能是网络/限流，不是正则失配。
 
+### 1.4 全链路兜底：自动生成检索清单
+
+**问题**：两个数据源都挂时，脚本只打印错误并 `exit 2`，用户/agent 拿到的是死路。
+
+**改动**：新增 `build_search_plan()`。当 `total_items == 0` 时，向输出目录写入
+`search-plan.md`，内容为按赛道/关键词展开的可执行检索式，并附必填字段表与三条硬性约束
+（不估算阅读量、声明来源、不把搜不到当没有）。
+
+**实测**：`--fallback-pages 0` 强制失败后，`search-plan.md` 正常生成，退出码 2，
+stderr 中直接给出该文件路径。
+
 已知噪声：搜狗为全文检索，「星座」会混入「星座商厦」「卫星星座」。关键词越具体越好。
 
 ## 2. `gzh-Skills/gzh-explosive-content-detector/scripts/fetch_gzh_trends.py`
